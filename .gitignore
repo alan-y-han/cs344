@@ -18,6 +18,7 @@ bin
 
 cmake-build-debug
 
+*.png
 
 # Created by https://www.gitignore.io/api/c++,clion
 
