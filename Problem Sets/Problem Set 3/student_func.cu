@@ -81,6 +81,45 @@
 
 #include "utils.h"
 
+const unsigned int block_1D = 1024;
+
+//__device__ float calcMin(float a, float b)
+//{
+//    return min(a, b);
+//}
+//
+//__device__ float calcMax(float a, float b)
+//{
+//    return min(a, b);
+//}
+
+__global__
+void reduce(float* const values, unsigned int noOfElems)
+{
+    int positionInImage = blockIdx.x * blockDim.x + threadIdx.x;
+    if (positionInImage >= noOfElems) return;
+
+    int positionInThread = threadIdx.x;
+
+    // N.B. only works if BlockDim.x is a power of 2
+    for (int s = blockDim.x / 2; s > 0; s>>=1)
+    {
+        if (positionInThread < s)
+        {
+            values[positionInImage] = max(values[positionInImage], values[positionInImage + s]);
+        }
+        __syncthreads();
+    }
+}
+
+__global__
+void gather(float* const values, unsigned int noOfElems, unsigned int elemsPerBlock)
+{
+    int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (globalPos >= noOfElems) return;
+    values[globalPos] = values[globalPos * elemsPerBlock];
+}
+
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
                                   float &min_logLum,
@@ -90,15 +129,28 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numBins)
 {
   //TODO
-  /*Here are the steps you need to implement
-    1) find the minimum and maximum value in the input logLuminance channel
-       store in min_logLum and max_logLum
-    2) subtract them to find the range
-    3) generate a histogram of all the values in the logLuminance channel using
-       the formula: bin = (lum[i] - lumMin) / lumRange * numBins
-    4) Perform an exclusive scan (prefix sum) on the histogram to get
-       the cumulative distribution of luminance values (this should go in the
-       incoming d_cdf pointer which already has been allocated for you)       */
+    /*Here are the steps you need to implement
+      1) find the minimum and maximum value in the input logLuminance channel
+         store in min_logLum and max_logLum
+      2) subtract them to find the range
+      3) generate a histogram of all the values in the logLuminance channel using
+         the formula: bin = (lum[i] - lumMin) / lumRange * numBins
+      4) Perform an exclusive scan (prefix sum) on the histogram to get
+         the cumulative distribution of luminance values (this should go in the
+         incoming d_cdf pointer which already has been allocated for you)       */
 
+    unsigned int elemsToReduce = numRows * numCols;
+    unsigned int grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
+    do
+    {
+//        reduce<<<grid_1D, block_1D>>>(d_logLuminance, elemsToReduce);
+
+        elemsToReduce = grid_1D;
+        grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
+
+//        gather<<<grid_1D, block_1D>>>(d_logLuminance, elemsToReduce, block_1D);
+    } while (elemsToReduce > block_1D);
+
+//    const dim3 gridSize()
 
 }
