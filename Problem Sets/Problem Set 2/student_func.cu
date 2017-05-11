@@ -104,7 +104,7 @@
 #include <cstdio>
 #include "utils.h"
 
-#define NUM_THREADS_1D 32
+#define BLOCK_1D 32
 
 __global__
 void gaussian_blur(const unsigned char *const inputChannel,
@@ -259,15 +259,15 @@ void your_gaussian_blur(const uchar4 *const h_inputImageRGBA, uchar4 *const d_in
                         const int filterWidth)
 {
     //TODO: Set reasonable block size (i.e., number of threads per block)
-    const dim3 blockSize(NUM_THREADS_1D, NUM_THREADS_1D, 1);
+    const dim3 blockSize(BLOCK_1D, BLOCK_1D, 1);
 
     //TODO:
     //Compute correct grid size (i.e., number of blocks per kernel launch)
     //from the image size and and block size.
 
     // +/- stuff below is to calculate a fast ceiling division
-    const dim3 gridSize(uint((numCols + NUM_THREADS_1D - 1) / NUM_THREADS_1D),
-                        uint((numRows + NUM_THREADS_1D - 1) / NUM_THREADS_1D),
+    const dim3 gridSize(uint((numCols + BLOCK_1D - 1) / BLOCK_1D),
+                        uint((numRows + BLOCK_1D - 1) / BLOCK_1D),
                         1);
 
     //TODO: Launch a kernel for separating the RGBA image into different color channels
