@@ -79,11 +79,12 @@
 
 */
 
+#include <cmath>
 #include "utils.h"
 
 typedef float(*reduceFn_t)(float, float);
 
-const unsigned int block_1D = 1024;
+const unsigned int BLOCK_1D = 1024;
 
 __device__
 float calcMin(float a, float b)
@@ -104,15 +105,14 @@ reduceFn_t hp_calcMin;
 reduceFn_t hp_calcMax;
 
 __global__
-void reduce(float* const values, unsigned int noOfElems, reduceFn_t reduceFn)
+void reduce(float* const values, const unsigned int noOfElems, reduceFn_t reduceFn)
 {
     int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
     if (globalPos >= noOfElems) return;
 
     int localPos = threadIdx.x;
 
-    // N.B. only works if BlockDim.x is a power of 2
-    for (int s = blockDim.x / 2; s > 0; s>>=1)
+    for (int s = blockDim.x / 2; s > 0; s >>= 1)
     {
         if (localPos < s && ((globalPos + s) < noOfElems))
         {
@@ -123,11 +123,42 @@ void reduce(float* const values, unsigned int noOfElems, reduceFn_t reduceFn)
 }
 
 __global__
-void gather(float* const values, unsigned int noOfElems)
+void gather(float* const values, const unsigned int noOfElems)
 {
     int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
     if (globalPos >= noOfElems) return;
     values[globalPos] = values[globalPos * blockDim.x];
+}
+
+__global__
+void atomic_histo(unsigned int* d_bins, const float* d_in, const int BIN_COUNT, const unsigned int noOfElems, const float lumMin, const float lumRange)
+{
+    int globalPos = blockDim.x * blockIdx.x + threadIdx.x;
+    if (globalPos >= noOfElems) return;
+    float itemToSort = d_in[globalPos];
+    int myBin = (itemToSort - lumMin) / lumRange * BIN_COUNT;
+    atomicAdd(&(d_bins[myBin]), 1);
+}
+
+__global__
+void globalAddReduce(unsigned int *const values, const unsigned int noOfElems, const int shift)
+{
+    int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int posInArray = noOfElems - 1 - (globalPos * (shift << 1));
+    int posOfReduceElem = posInArray - shift;
+
+    if (posInArray < 0 || posOfReduceElem < 0) return;
+
+    values[posInArray] += values[posOfReduceElem];
+}
+
+__global__
+void globalAddDownsweep(unsigned int *const values, const unsigned int noOfElems, const int shift)
+{
+    int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
+
+//    int posInArray = noOfElems - 1 -
 }
 
 float cudaReduce(unsigned int noOfElems, const float *const d_array, reduceFn_t d_reduceFn)
@@ -137,16 +168,16 @@ float cudaReduce(unsigned int noOfElems, const float *const d_array, reduceFn_t 
     checkCudaErrors(cudaMemcpy(d_arrayCopy, d_array, sizeof(float) * noOfElems, cudaMemcpyDeviceToDevice));
 
     unsigned int elemsToReduce = noOfElems;
-    unsigned int grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
+    unsigned int grid_1D = (elemsToReduce + BLOCK_1D - 1) / BLOCK_1D;
     do
     {
-        reduce<<<grid_1D, block_1D>>>(d_arrayCopy, elemsToReduce, d_reduceFn);
+        reduce<<<grid_1D, BLOCK_1D>>>(d_arrayCopy, elemsToReduce, d_reduceFn);
         checkCudaErrors(cudaGetLastError());
-//
+
         elemsToReduce = grid_1D;
-        grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
-//
-        gather<<<grid_1D, block_1D>>>(d_arrayCopy, elemsToReduce);
+        grid_1D = (elemsToReduce + BLOCK_1D - 1) / BLOCK_1D;
+
+        gather<<<grid_1D, BLOCK_1D>>>(d_arrayCopy, elemsToReduce);
         checkCudaErrors(cudaGetLastError());
     } while (elemsToReduce > 1);
 
@@ -154,6 +185,35 @@ float cudaReduce(unsigned int noOfElems, const float *const d_array, reduceFn_t 
     checkCudaErrors(cudaMemcpy(&result, d_arrayCopy, sizeof(float), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaFree(d_arrayCopy));
     return result;
+}
+
+void cudaCDF(const float *const d_inputHisto, unsigned int *const d_outputBins, const unsigned int noOfElems)
+{
+    cudaMemcpy(d_outputBins, d_inputHisto, sizeof(float) * noOfElems, cudaMemcpyDeviceToDevice);
+
+    unsigned int noElemsNearestPow2 = round(pow(2, ceil(log2(static_cast<float>(noOfElems))))); // compute the next highest power of 2 of 32-bit
+
+    // Reduce step
+    for (int shift = 1, noThreads = (noElemsNearestPow2 >> 1);
+         shift < noElemsNearestPow2;
+         shift <<= 1, noThreads >>= 1)
+    {
+        unsigned int grid_1D = (noThreads + BLOCK_1D - 1) / BLOCK_1D;
+        globalAddReduce<<<grid_1D, BLOCK_1D>>>(d_outputBins, noOfElems, shift);
+        checkCudaErrors(cudaGetLastError());
+    }
+
+    // Downsweep step
+    int identityValue = 0;
+    cudaMemcpy(&d_outputBins[noOfElems - 1], &identityValue, sizeof(float), cudaMemcpyHostToDevice);
+    for (int shift = (noElemsNearestPow2 >> 1), noThreads = 1;
+         shift > 0;
+         shift >>= 1, noThreads <<= 1)
+    {
+        unsigned int grid_1D = (noThreads + BLOCK_1D - 1) / BLOCK_1D;
+        globalAddDownsweep<<<grid_1D, BLOCK_1D>>>(d_outputBins, noOfElems, shift);
+        checkCudaErrors(cudaGetLastError());
+    }
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
@@ -175,11 +235,27 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
          the cumulative distribution of luminance values (this should go in the
          incoming d_cdf pointer which already has been allocated for you)       */
 
+    const unsigned int noOfElems = numRows * numCols;
+
     cudaMemcpyFromSymbol(&hp_calcMin, dp_calcMin, sizeof(reduceFn_t));
     cudaMemcpyFromSymbol(&hp_calcMax, dp_calcMax, sizeof(reduceFn_t));
 
-    float minValue = cudaReduce(numRows * numCols, d_logLuminance, hp_calcMin);
-    float maxValue = cudaReduce(numRows * numCols, d_logLuminance, hp_calcMax);
-    std::cout << minValue << std::endl;
-    std::cout << maxValue << std::endl;
+    // 1.
+    min_logLum = cudaReduce(noOfElems, d_logLuminance, hp_calcMin);
+    max_logLum = cudaReduce(noOfElems, d_logLuminance, hp_calcMax);
+    std::cout << "GPU min: " << min_logLum << std::endl;
+    std::cout << "GPU max: " << max_logLum << std::endl;
+
+    // 2.
+    float logLumRange = max_logLum - min_logLum;
+
+    // 3.
+    unsigned int grid_1D = (noOfElems + BLOCK_1D - 1) / BLOCK_1D;
+
+    atomic_histo<<<grid_1D, BLOCK_1D>>>(d_cdf, d_logLuminance, numBins, noOfElems, min_logLum, logLumRange);
+    checkCudaErrors(cudaGetLastError());
+
+    // 4.
+//    cudaCDF(d_logLuminance, d_cdf, noOfElems);
+
 }
