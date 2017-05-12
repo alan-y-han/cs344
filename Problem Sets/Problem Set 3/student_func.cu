@@ -81,20 +81,30 @@
 
 #include "utils.h"
 
+typedef float(*reduceFn_t)(float, float);
+
 const unsigned int block_1D = 1024;
 
-__device__ float calcMin(float a, float b)
+__device__
+float calcMin(float a, float b)
 {
     return min(a, b);
 }
 
-__device__ float calcMax(float a, float b)
+__device__
+float calcMax(float a, float b)
 {
     return max(a, b);
 }
 
+__device__ reduceFn_t dp_calcMin = calcMin;
+__device__ reduceFn_t dp_calcMax = calcMax;
+
+reduceFn_t hp_calcMin;
+reduceFn_t hp_calcMax;
+
 __global__
-void reduce(float* const values, unsigned int noOfElems, float(*reduceFn)(float, float))
+void reduce(float* const values, unsigned int noOfElems, reduceFn_t reduceFn)
 {
     int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
     if (globalPos >= noOfElems) return;
@@ -120,32 +130,30 @@ void gather(float* const values, unsigned int noOfElems)
     values[globalPos] = values[globalPos * blockDim.x];
 }
 
-float cudaReduce(unsigned int noOfElems, const float *const d_array, float(*d_reduceFn)(float, float))
+float cudaReduce(unsigned int noOfElems, const float *const d_array, reduceFn_t d_reduceFn)
 {
-    float* d_maxImgCpy;
-    float* d_minImgCpy;
-    checkCudaErrors(cudaMalloc(&d_maxImgCpy, sizeof(float) * noOfElems));
-    checkCudaErrors(cudaMalloc(&d_minImgCpy, sizeof(float) * noOfElems));
-    checkCudaErrors(cudaMemcpy(d_maxImgCpy, d_array, sizeof(float) * noOfElems, cudaMemcpyDeviceToDevice));
-    checkCudaErrors(cudaMemcpy(d_minImgCpy, d_array, sizeof(float) * noOfElems, cudaMemcpyDeviceToDevice));
+    float* d_arrayCopy;
+    checkCudaErrors(cudaMalloc(&d_arrayCopy, sizeof(float) * noOfElems));
+    checkCudaErrors(cudaMemcpy(d_arrayCopy, d_array, sizeof(float) * noOfElems, cudaMemcpyDeviceToDevice));
 
     unsigned int elemsToReduce = noOfElems;
     unsigned int grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
     do
     {
-        reduce<<<grid_1D, block_1D>>>(d_maxImgCpy, elemsToReduce, &calcMax);
+        reduce<<<grid_1D, block_1D>>>(d_arrayCopy, elemsToReduce, d_reduceFn);
         checkCudaErrors(cudaGetLastError());
-        reduce<<<grid_1D, block_1D>>>(d_minImgCpy, elemsToReduce, &calcMin);
-        checkCudaErrors(cudaGetLastError());
-
+//
         elemsToReduce = grid_1D;
         grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
-
-        gather<<<grid_1D, block_1D>>>(d_maxImgCpy, elemsToReduce);
-        checkCudaErrors(cudaGetLastError());
-        gather<<<grid_1D, block_1D>>>(d_minImgCpy, elemsToReduce);
+//
+        gather<<<grid_1D, block_1D>>>(d_arrayCopy, elemsToReduce);
         checkCudaErrors(cudaGetLastError());
     } while (elemsToReduce > 1);
+
+    float result;
+    checkCudaErrors(cudaMemcpy(&result, d_arrayCopy, sizeof(float), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaFree(d_arrayCopy));
+    return result;
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
@@ -167,6 +175,11 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
          the cumulative distribution of luminance values (this should go in the
          incoming d_cdf pointer which already has been allocated for you)       */
 
-    float maxValue = cudaReduce(numRows * numCols, d_logLuminance, &calcMax);
+    cudaMemcpyFromSymbol(&hp_calcMin, dp_calcMin, sizeof(reduceFn_t));
+    cudaMemcpyFromSymbol(&hp_calcMax, dp_calcMax, sizeof(reduceFn_t));
 
+    float minValue = cudaReduce(numRows * numCols, d_logLuminance, hp_calcMin);
+    float maxValue = cudaReduce(numRows * numCols, d_logLuminance, hp_calcMax);
+    std::cout << minValue << std::endl;
+    std::cout << maxValue << std::endl;
 }
