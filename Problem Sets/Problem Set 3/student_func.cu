@@ -83,41 +83,69 @@
 
 const unsigned int block_1D = 1024;
 
-//__device__ float calcMin(float a, float b)
-//{
-//    return min(a, b);
-//}
-//
-//__device__ float calcMax(float a, float b)
-//{
-//    return min(a, b);
-//}
+__device__ float calcMin(float a, float b)
+{
+    return min(a, b);
+}
+
+__device__ float calcMax(float a, float b)
+{
+    return max(a, b);
+}
 
 __global__
-void reduce(float* const values, unsigned int noOfElems)
+void reduce(float* const values, unsigned int noOfElems, float(*reduceFn)(float, float))
 {
-    int positionInImage = blockIdx.x * blockDim.x + threadIdx.x;
-    if (positionInImage >= noOfElems) return;
+    int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (globalPos >= noOfElems) return;
 
-    int positionInThread = threadIdx.x;
+    int localPos = threadIdx.x;
 
     // N.B. only works if BlockDim.x is a power of 2
     for (int s = blockDim.x / 2; s > 0; s>>=1)
     {
-        if (positionInThread < s)
+        if (localPos < s && ((globalPos + s) < noOfElems))
         {
-            values[positionInImage] = max(values[positionInImage], values[positionInImage + s]);
+            values[globalPos] = reduceFn(values[globalPos], values[globalPos + s]);
         }
         __syncthreads();
     }
 }
 
 __global__
-void gather(float* const values, unsigned int noOfElems, unsigned int elemsPerBlock)
+void gather(float* const values, unsigned int noOfElems)
 {
     int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
     if (globalPos >= noOfElems) return;
-    values[globalPos] = values[globalPos * elemsPerBlock];
+    values[globalPos] = values[globalPos * blockDim.x];
+}
+
+float cudaReduce(unsigned int noOfElems, const float *const d_array, float(*d_reduceFn)(float, float))
+{
+    float* d_maxImgCpy;
+    float* d_minImgCpy;
+    checkCudaErrors(cudaMalloc(&d_maxImgCpy, sizeof(float) * noOfElems));
+    checkCudaErrors(cudaMalloc(&d_minImgCpy, sizeof(float) * noOfElems));
+    checkCudaErrors(cudaMemcpy(d_maxImgCpy, d_array, sizeof(float) * noOfElems, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpy(d_minImgCpy, d_array, sizeof(float) * noOfElems, cudaMemcpyDeviceToDevice));
+
+    unsigned int elemsToReduce = noOfElems;
+    unsigned int grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
+    do
+    {
+        reduce<<<grid_1D, block_1D>>>(d_maxImgCpy, elemsToReduce, &calcMax);
+        checkCudaErrors(cudaGetLastError());
+        reduce<<<grid_1D, block_1D>>>(d_minImgCpy, elemsToReduce, &calcMin);
+        checkCudaErrors(cudaGetLastError());
+
+        elemsToReduce = grid_1D;
+        grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
+
+        gather<<<grid_1D, block_1D>>>(d_maxImgCpy, elemsToReduce);
+        checkCudaErrors(cudaGetLastError());
+        gather<<<grid_1D, block_1D>>>(d_minImgCpy, elemsToReduce);
+        checkCudaErrors(cudaGetLastError());
+    } while (elemsToReduce > 1);
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
@@ -139,18 +167,6 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
          the cumulative distribution of luminance values (this should go in the
          incoming d_cdf pointer which already has been allocated for you)       */
 
-    unsigned int elemsToReduce = numRows * numCols;
-    unsigned int grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
-    do
-    {
-//        reduce<<<grid_1D, block_1D>>>(d_logLuminance, elemsToReduce);
-
-        elemsToReduce = grid_1D;
-        grid_1D = (elemsToReduce + block_1D - 1) / block_1D;
-
-//        gather<<<grid_1D, block_1D>>>(d_logLuminance, elemsToReduce, block_1D);
-    } while (elemsToReduce > block_1D);
-
-//    const dim3 gridSize()
+    float maxValue = cudaReduce(numRows * numCols, d_logLuminance, &calcMax);
 
 }
