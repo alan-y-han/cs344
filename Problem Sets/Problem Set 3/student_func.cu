@@ -79,7 +79,6 @@
 
 */
 
-#include <cmath>
 #include "utils.h"
 
 typedef float(*reduceFn_t)(float, float);
@@ -158,7 +157,14 @@ void globalAddDownsweep(unsigned int *const values, const unsigned int noOfElems
 {
     int globalPos = blockIdx.x * blockDim.x + threadIdx.x;
 
-//    int posInArray = noOfElems - 1 -
+    int rightElem = noOfElems - 1 - (globalPos * (shift << 1));
+    int leftElem = rightElem - shift;
+
+    if (rightElem < 0 || leftElem < 0) return;
+
+    unsigned int rightElemValue = values[rightElem];
+    values[rightElem] += values[leftElem];
+    values[leftElem] = rightElemValue;
 }
 
 float cudaReduce(unsigned int noOfElems, const float *const d_array, reduceFn_t d_reduceFn)
@@ -187,31 +193,29 @@ float cudaReduce(unsigned int noOfElems, const float *const d_array, reduceFn_t 
     return result;
 }
 
-void cudaCDF(const float *const d_inputHisto, unsigned int *const d_outputBins, const unsigned int noOfElems)
+void cudaCDFHisto(unsigned int *const d_histo, const unsigned int numBins)
 {
-    cudaMemcpy(d_outputBins, d_inputHisto, sizeof(float) * noOfElems, cudaMemcpyDeviceToDevice);
-
-    unsigned int noElemsNearestPow2 = round(pow(2, ceil(log2(static_cast<float>(noOfElems))))); // compute the next highest power of 2 of 32-bit
+    const int noElemsNearestHighPow2 = round(pow(2, ceil(log2(static_cast<float>(numBins)))));
 
     // Reduce step
-    for (int shift = 1, noThreads = (noElemsNearestPow2 >> 1);
-         shift < noElemsNearestPow2;
+    for (int shift = 1, noThreads = (noElemsNearestHighPow2 >> 1);
+         shift < noElemsNearestHighPow2;
          shift <<= 1, noThreads >>= 1)
     {
         unsigned int grid_1D = (noThreads + BLOCK_1D - 1) / BLOCK_1D;
-        globalAddReduce<<<grid_1D, BLOCK_1D>>>(d_outputBins, noOfElems, shift);
+        globalAddReduce<<<grid_1D, BLOCK_1D>>>(d_histo, numBins, shift);
         checkCudaErrors(cudaGetLastError());
     }
 
     // Downsweep step
-    int identityValue = 0;
-    cudaMemcpy(&d_outputBins[noOfElems - 1], &identityValue, sizeof(float), cudaMemcpyHostToDevice);
-    for (int shift = (noElemsNearestPow2 >> 1), noThreads = 1;
+    unsigned int identityValue = 0;
+    checkCudaErrors(cudaMemcpy(&d_histo[numBins - 1], &identityValue, sizeof(unsigned int), cudaMemcpyHostToDevice));
+    for (int shift = (noElemsNearestHighPow2 >> 1), noThreads = 1;
          shift > 0;
          shift >>= 1, noThreads <<= 1)
     {
         unsigned int grid_1D = (noThreads + BLOCK_1D - 1) / BLOCK_1D;
-        globalAddDownsweep<<<grid_1D, BLOCK_1D>>>(d_outputBins, noOfElems, shift);
+        globalAddDownsweep<<<grid_1D, BLOCK_1D>>>(d_histo, numBins, shift);
         checkCudaErrors(cudaGetLastError());
     }
 }
@@ -243,8 +247,6 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
     // 1.
     min_logLum = cudaReduce(noOfElems, d_logLuminance, hp_calcMin);
     max_logLum = cudaReduce(noOfElems, d_logLuminance, hp_calcMax);
-    std::cout << "GPU min: " << min_logLum << std::endl;
-    std::cout << "GPU max: " << max_logLum << std::endl;
 
     // 2.
     float logLumRange = max_logLum - min_logLum;
@@ -256,6 +258,5 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
     checkCudaErrors(cudaGetLastError());
 
     // 4.
-//    cudaCDF(d_logLuminance, d_cdf, noOfElems);
-
+    cudaCDFHisto(d_cdf, numBins);
 }
