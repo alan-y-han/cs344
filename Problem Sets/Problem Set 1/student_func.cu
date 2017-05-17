@@ -31,6 +31,12 @@
 //You should fill in the kernel as well as set the block and grid sizes
 //so that the entire image is processed.
 
+#ifdef __JETBRAINS_IDE__
+#define threadIdx()
+#define blockIdx()
+#define blockDim()
+#endif
+
 #include "utils.h"
 
 #define NUM_THREADS 32

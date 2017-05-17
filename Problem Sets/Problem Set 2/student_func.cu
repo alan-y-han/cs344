@@ -100,6 +100,12 @@
 
 //****************************************************************************
 
+#ifdef __JETBRAINS_IDE__
+#define threadIdx()
+#define blockIdx()
+#define blockDim()
+#endif
+
 #include <cublas_v2.h>
 #include <cstdio>
 #include "utils.h"

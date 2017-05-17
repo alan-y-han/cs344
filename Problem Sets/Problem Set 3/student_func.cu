@@ -79,6 +79,18 @@
 
 */
 
+#ifdef __JETBRAINS_IDE__
+#define threadIdx()
+#define blockIdx()
+#define blockDim()
+#define min
+#define max
+#define __syncthreads
+#define atomicAdd
+#define <<<()
+#define >>>()
+#endif
+
 #include "utils.h"
 
 typedef float(*reduceFn_t)(float, float);
